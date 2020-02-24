@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2017-2018 Ribose Inc.
+ * Copyright (c) 2017-2020, Ribose Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,7 +42,6 @@
 #include <librepgp/stream-packet.h>
 #include <librepgp/stream-key.h>
 #include <librepgp/stream-dump.h>
-#include "packet-create.h"
 #include <rnp/rnp.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -224,6 +223,19 @@ static const pgp_map_t key_import_status_map[] = {
   {PGP_KEY_IMPORT_STATUS_UPDATED, "updated"},
   {PGP_KEY_IMPORT_STATUS_NEW, "new"}};
 
+static const pgp_map_t sig_import_status_map[] = {
+  {PGP_SIG_IMPORT_STATUS_UNKNOWN, "unknown"},
+  {PGP_SIG_IMPORT_STATUS_UNKNOWN_KEY, "unknown key"},
+  {PGP_SIG_IMPORT_STATUS_UNCHANGED, "unchanged"},
+  {PGP_SIG_IMPORT_STATUS_NEW, "new"}};
+
+static const pgp_map_t revocation_code_map[] = {
+  {PGP_REVOCATION_NO_REASON, "no"},
+  {PGP_REVOCATION_SUPERSEDED, "superseded"},
+  {PGP_REVOCATION_COMPROMISED, "compromised"},
+  {PGP_REVOCATION_RETIRED, "retired"},
+  {PGP_REVOCATION_NO_LONGER_VALID, "no longer valid"}};
+
 static bool
 curve_str_to_type(const char *str, pgp_curve_t *value)
 {
@@ -290,6 +302,18 @@ str_to_compression_alg(const char *str, pgp_compression_type_t *zalg)
         return false;
     }
     *zalg = alg;
+    return true;
+}
+
+static bool
+str_to_revocation_type(const char *str, pgp_revocation_type_t *code)
+{
+    pgp_revocation_type_t rev = PGP_REVOCATION_NO_REASON;
+    ARRAY_LOOKUP_BY_STRCASE(revocation_code_map, string, type, str, rev);
+    if ((rev == PGP_REVOCATION_NO_REASON) && rnp_strcasecmp(str, "no")) {
+        return false;
+    }
+    *code = rev;
     return true;
 }
 
@@ -1302,6 +1326,117 @@ rnp_import_keys(rnp_ffi_t ffi, rnp_input_t input, uint32_t flags, char **results
     ret = RNP_SUCCESS;
 done:
     rnp_key_store_free(tmp_store);
+    json_object_put(jsores);
+    return ret;
+}
+
+static const char *
+sig_status_to_str(pgp_sig_import_status_t status)
+{
+    if (status == PGP_SIG_IMPORT_STATUS_UNKNOWN) {
+        return "none";
+    }
+    const char *str = "none";
+    ARRAY_LOOKUP_BY_ID(sig_import_status_map, type, string, status, str);
+    return str;
+}
+
+static rnp_result_t
+add_sig_status(json_object *           sigs,
+               const pgp_key_t *       signer,
+               pgp_sig_import_status_t pub,
+               pgp_sig_import_status_t sec)
+{
+    json_object *jsosig = json_object_new_object();
+    if (!jsosig) {
+        return RNP_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (!obj_add_field_json(
+          jsosig, "public", json_object_new_string(sig_status_to_str(pub))) ||
+        !obj_add_field_json(
+          jsosig, "secret", json_object_new_string(sig_status_to_str(sec)))) {
+        json_object_put(jsosig);
+        return RNP_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (signer) {
+        const pgp_fingerprint_t *fp = pgp_key_get_fp(signer);
+        if (!obj_add_hex_json(jsosig, "signer fingerprint", fp->fingerprint, fp->length)) {
+            json_object_put(jsosig);
+            return RNP_ERROR_OUT_OF_MEMORY;
+        }
+    }
+
+    if (!array_add_element_json(sigs, jsosig)) {
+        json_object_put(jsosig);
+        return RNP_ERROR_OUT_OF_MEMORY;
+    }
+
+    return RNP_SUCCESS;
+}
+
+rnp_result_t
+rnp_import_signatures(rnp_ffi_t ffi, rnp_input_t input, uint32_t flags, char **results)
+{
+    if (!ffi || !input) {
+        return RNP_ERROR_NULL_POINTER;
+    }
+    if (flags) {
+        FFI_LOG(ffi, "wrong flags: %d", (int) flags);
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+
+    rnp_result_t ret = RNP_ERROR_GENERIC;
+    json_object *jsores = NULL;
+    json_object *jsosigs = NULL;
+    list         sigs = NULL;
+    rnp_result_t sigret = process_pgp_signatures(&input->src, &sigs);
+    if (sigret) {
+        ret = sigret;
+        FFI_LOG(ffi, "failed to parse signature(s)");
+        goto done;
+    }
+
+    jsores = json_object_new_object();
+    if (!jsores) {
+        ret = RNP_ERROR_OUT_OF_MEMORY;
+        goto done;
+    }
+    jsosigs = json_object_new_array();
+    if (!obj_add_field_json(jsores, "sigs", jsosigs)) {
+        ret = RNP_ERROR_OUT_OF_MEMORY;
+        goto done;
+    }
+
+    for (list_item *li = list_front(sigs); li; li = list_next(li)) {
+        pgp_sig_import_status_t pub_status = PGP_SIG_IMPORT_STATUS_UNKNOWN;
+        pgp_sig_import_status_t sec_status = PGP_SIG_IMPORT_STATUS_UNKNOWN;
+        pgp_signature_t *       sig = (pgp_signature_t *) li;
+        pgp_key_t *pkey = rnp_key_store_import_signature(ffi->pubring, sig, &pub_status);
+        pgp_key_t *skey = rnp_key_store_import_signature(ffi->secring, sig, &sec_status);
+        sigret = add_sig_status(jsosigs, pkey ? pkey : skey, pub_status, sec_status);
+        if (sigret) {
+            ret = sigret;
+            goto done;
+        }
+    }
+
+    if (results) {
+        *results = (char *) json_object_to_json_string_ext(jsores, JSON_C_TO_STRING_PRETTY);
+        if (!*results) {
+            ret = RNP_ERROR_OUT_OF_MEMORY;
+            goto done;
+        }
+        *results = strdup(*results);
+        if (!*results) {
+            ret = RNP_ERROR_OUT_OF_MEMORY;
+            goto done;
+        }
+    }
+    ret = RNP_SUCCESS;
+done:
+    signature_list_destroy(&sigs);
     json_object_put(jsores);
     return ret;
 }
@@ -2987,7 +3122,7 @@ rnp_key_export(rnp_key_handle_t handle, rnp_output_t output, uint32_t flags)
     // write
     if (pgp_key_is_primary_key(key)) {
         // primary key, write just the primary or primary and all subkeys
-        if (!pgp_write_xfer_key(dst, key, export_subs ? store : NULL)) {
+        if (!pgp_key_write_xfer(dst, key, export_subs ? store : NULL)) {
             return RNP_ERROR_GENERIC;
         }
     } else {
@@ -3002,10 +3137,10 @@ rnp_key_export(rnp_key_handle_t handle, rnp_output_t output, uint32_t flags)
             // shouldn't happen
             return RNP_ERROR_GENERIC;
         }
-        if (!pgp_write_xfer_key(dst, primary, NULL)) {
+        if (!pgp_key_write_xfer(dst, primary, NULL)) {
             return RNP_ERROR_GENERIC;
         }
-        if (!pgp_write_xfer_key(dst, key, NULL)) {
+        if (!pgp_key_write_xfer(dst, key, NULL)) {
             return RNP_ERROR_GENERIC;
         }
     }
@@ -3015,6 +3150,113 @@ rnp_key_export(rnp_key_handle_t handle, rnp_output_t output, uint32_t flags)
     }
     output->keep = true;
     return RNP_SUCCESS;
+}
+
+static pgp_key_t *
+rnp_key_get_revoker(rnp_key_handle_t key)
+{
+    pgp_key_t *exkey = get_key_prefer_public(key);
+    if (!exkey) {
+        return NULL;
+    }
+    if (pgp_key_is_subkey(exkey)) {
+        return rnp_key_store_get_primary_key(key->ffi->secring, exkey);
+    }
+    // TODO: search through revocation key subpackets as well
+    return get_key_require_secret(key);
+}
+
+static rnp_result_t
+rnp_key_get_revocation(rnp_ffi_t         ffi,
+                       pgp_key_t *       key,
+                       pgp_key_t *       revoker,
+                       const char *      hash,
+                       const char *      code,
+                       const char *      reason,
+                       pgp_signature_t **sig)
+{
+    *sig = NULL;
+    if (!hash) {
+        hash = DEFAULT_HASH_ALG;
+    }
+    pgp_hash_alg_t halg = PGP_HASH_UNKNOWN;
+    if (!str_to_hash_alg(hash, &halg)) {
+        FFI_LOG(ffi, "Unknown hash algorithm: %s", hash);
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+    pgp_revoke_t revinfo = {};
+    if (code && !str_to_revocation_type(code, &revinfo.code)) {
+        FFI_LOG(ffi, "Wrong revocation code: %s", code);
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+    if (revinfo.code > PGP_REVOCATION_RETIRED) {
+        FFI_LOG(ffi, "Wrong key revocation code: %d", (int) revinfo.code);
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+    if (reason) {
+        revinfo.reason = strdup(reason);
+        if (!revinfo.reason) {
+            FFI_LOG(ffi, "Allocation failed");
+            return RNP_ERROR_OUT_OF_MEMORY;
+        }
+    }
+    /* unlock the secret key if needed */
+    bool locked = pgp_key_is_locked(revoker);
+    if (locked && !pgp_key_unlock(revoker, &ffi->pass_provider)) {
+        FFI_LOG(ffi, "Failed to unlock secret key");
+        revoke_free(&revinfo);
+        return RNP_ERROR_BAD_PASSWORD;
+    }
+    *sig =
+      transferable_key_revoke(pgp_key_get_pkt(key), pgp_key_get_pkt(revoker), halg, &revinfo);
+    if (!*sig) {
+        FFI_LOG(ffi, "Failed to generate revocation signature");
+    }
+    if (locked) {
+        pgp_key_lock(revoker);
+    }
+    revoke_free(&revinfo);
+    return *sig ? RNP_SUCCESS : RNP_ERROR_BAD_STATE;
+}
+
+rnp_result_t
+rnp_key_export_revocation(rnp_key_handle_t key,
+                          rnp_output_t     output,
+                          uint32_t         flags,
+                          const char *     hash,
+                          const char *     code,
+                          const char *     reason)
+{
+    if (!key || !key->ffi || !output) {
+        return RNP_ERROR_NULL_POINTER;
+    }
+    if (flags) {
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+
+    pgp_key_t *exkey = get_key_prefer_public(key);
+    if (!exkey || !pgp_key_is_primary_key(exkey)) {
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+    pgp_key_t *revoker = rnp_key_get_revoker(key);
+    if (!revoker) {
+        FFI_LOG(key->ffi, "Revoker secret key not found");
+        return RNP_ERROR_BAD_PARAMETERS;
+    }
+
+    pgp_signature_t *sig = NULL;
+    rnp_result_t     ret =
+      rnp_key_get_revocation(key->ffi, exkey, revoker, hash, code, reason, &sig);
+    if (ret) {
+        return ret;
+    }
+
+    ret = stream_write_signature(sig, &output->dst) ? RNP_SUCCESS : RNP_ERROR_WRITE;
+    dst_flush(&output->dst);
+    output->keep = !ret;
+    free_signature(sig);
+    free(sig);
+    return ret;
 }
 
 rnp_result_t

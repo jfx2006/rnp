@@ -84,12 +84,14 @@ struct pgp_key_t {
 
 struct pgp_key_t *pgp_key_new(void);
 
-/** create a key from the key pkt
+/**
+ * @brief Create pgp_key_t object from the OpenPGP key packet.
  *
- *  This sets up basic properties of the key like keyid/fpr/grip, type, etc.
- *  It does not set primary_grip or subkey_grips (the key store does this).
+ * @param key pointer to the key object, cannot be NULL.
+ * @param pkt pointer to the key packet, cannot be NULL.
+ * @return true if operation succeeded or false otherwise.
  */
-bool pgp_key_from_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt, const pgp_content_enum tag);
+bool pgp_key_from_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt);
 
 /** free the internal data of a key *and* the key structure itself
  *
@@ -158,7 +160,7 @@ pgp_curve_t pgp_key_get_curve(const pgp_key_t *key);
 
 pgp_version_t pgp_key_get_version(const pgp_key_t *key);
 
-int pgp_key_get_type(const pgp_key_t *key);
+pgp_pkt_type_t pgp_key_get_type(const pgp_key_t *key);
 
 bool pgp_key_is_encrypted(const pgp_key_t *);
 
@@ -263,6 +265,8 @@ size_t pgp_key_get_revoke_count(const pgp_key_t *);
 
 pgp_revoke_t *pgp_key_get_revoke(const pgp_key_t *, size_t);
 
+void revoke_free(pgp_revoke_t *revoke);
+
 pgp_subsig_t *pgp_key_add_subsig(pgp_key_t *);
 
 size_t pgp_key_get_subsig_count(const pgp_key_t *);
@@ -271,7 +275,7 @@ pgp_subsig_t *pgp_key_get_subsig(const pgp_key_t *, size_t);
 
 void pgp_subsig_free(pgp_subsig_t *subsig);
 
-pgp_rawpacket_t *pgp_key_add_rawpacket(pgp_key_t *, void *, size_t, pgp_content_enum);
+pgp_rawpacket_t *pgp_key_add_rawpacket(pgp_key_t *, void *, size_t, pgp_pkt_type_t);
 
 pgp_rawpacket_t *pgp_key_add_key_rawpacket(pgp_key_t *key, pgp_key_pkt_t *pkt);
 
@@ -410,6 +414,16 @@ bool pgp_key_add_userid_certified(pgp_key_t *              key,
 
 bool pgp_key_write_packets(const pgp_key_t *key, pgp_dest_t *dst);
 
+/**
+ * @brief Write OpenPGP key packets (including subkeys) to the specified stream
+ *
+ * @param dst stream to write packets
+ * @param key key
+ * @param keyring keyring, which will be searched for subkeys
+ * @return true on success or false otherwise
+ */
+bool pgp_key_write_xfer(pgp_dest_t *dst, const pgp_key_t *key, const rnp_key_store_t *keyring);
+
 /** find a key suitable for a particular operation
  *
  *  If the key passed is suitable, it will be returned.
@@ -430,10 +444,6 @@ pgp_key_t *find_suitable_key(pgp_op_t            op,
                              pgp_key_t *         key,
                              pgp_key_provider_t *key_provider,
                              uint8_t             desired_usage);
-
-pgp_key_t *pgp_get_primary_key_for(const pgp_key_t *         subkey,
-                                   const rnp_key_store_t *   store,
-                                   const pgp_key_provider_t *key_provider);
 
 /*
  *  Picks up hash algorithm according to domain parameters set

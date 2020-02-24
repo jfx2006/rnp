@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2017-2020, [Ribose Inc](https://www.ribose.com).
  * Copyright (c) 2009 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -146,7 +146,7 @@ typedef struct pgp_key_protection_t {
 
 /** Struct to hold a key packet. May contain public or private key/subkey */
 typedef struct pgp_key_pkt_t {
-    int              tag;           /* packet tag: public key/subkey or private key/subkey */
+    pgp_pkt_type_t   tag;           /* packet tag: public key/subkey or private key/subkey */
     pgp_version_t    version;       /* Key packet version */
     uint32_t         creation_time; /* Key creation time */
     pgp_pubkey_alg_t alg;
@@ -169,9 +169,9 @@ typedef struct pgp_key_t pgp_key_t;
  *  binary blob as it is. It may be distinguished by tag field.
  */
 typedef struct pgp_userid_pkt_t {
-    int      tag;
-    uint8_t *uid;
-    size_t   uid_len;
+    pgp_pkt_type_t tag;
+    uint8_t *      uid;
+    size_t         uid_len;
 } pgp_userid_pkt_t;
 
 typedef struct pgp_signature_t {
@@ -253,9 +253,9 @@ typedef struct pgp_sig_subpkt_t {
             unsigned    len;
         } signer; /* 5.2.3.22.  Signer's User ID */
         struct {
-            uint8_t     code;
-            const char *str;
-            unsigned    len;
+            pgp_revocation_type_t code;
+            const char *          str;
+            unsigned              len;
         } revocation_reason; /* 5.2.3.23.  Reason for Revocation */
         struct {
             bool mdc;
@@ -279,9 +279,9 @@ typedef struct pgp_sig_subpkt_t {
 
 /** pgp_rawpacket_t */
 typedef struct pgp_rawpacket_t {
-    pgp_content_enum tag;
-    size_t           length;
-    uint8_t *        raw;
+    pgp_pkt_type_t tag;
+    size_t         length;
+    uint8_t *      raw;
 } pgp_rawpacket_t;
 
 typedef enum {
@@ -348,9 +348,9 @@ typedef struct {
 
 /* user revocation info */
 typedef struct pgp_revoke_t {
-    uint32_t uid;    /* index in uid array */
-    uint8_t  code;   /* revocation code */
-    char *   reason; /* c'mon, spill the beans */
+    uint32_t              uid;    /* index in uid array */
+    pgp_revocation_type_t code;   /* revocation code */
+    char *                reason; /* c'mon, spill the beans */
 } pgp_revoke_t;
 
 typedef struct pgp_user_prefs_t {

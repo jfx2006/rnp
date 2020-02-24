@@ -330,6 +330,15 @@ rnp_key_store_merge_subkey(pgp_key_t *dst, const pgp_key_t *src, pgp_key_t *prim
         goto done;
     }
 
+    /* check whether key was unlocked and assign secret key data */
+    if (pgp_key_is_secret(dst) && !pgp_key_is_locked(dst)) {
+        /* we may do thing below only because key material is opaque structure without
+         * pointers! */
+        tmpkey.pkt.material = dst->pkt.material;
+    } else if (pgp_key_is_secret(src) && !pgp_key_is_locked(src)) {
+        tmpkey.pkt.material = src->pkt.material;
+    }
+
     pgp_key_free_data(dst);
     *dst = tmpkey;
     res = true;
@@ -388,6 +397,14 @@ rnp_key_store_merge_key(pgp_key_t *dst, const pgp_key_t *src)
         if (!pgp_key_add_subkey_grip(&tmpkey, (uint8_t *) li)) {
             RNP_LOG("failed to add subkey grip");
         }
+    }
+    /* check whether key was unlocked and assign secret key data */
+    if (pgp_key_is_secret(dst) && !pgp_key_is_locked(dst)) {
+        /* we may do thing below only because key material is opaque structure without
+         * pointers! */
+        tmpkey.pkt.material = dst->pkt.material;
+    } else if (pgp_key_is_secret(src) && !pgp_key_is_locked(src)) {
+        tmpkey.pkt.material = src->pkt.material;
     }
 
     pgp_key_free_data(dst);
@@ -552,6 +569,63 @@ rnp_key_store_import_key(rnp_key_store_t *        keyring,
     }
 
     return exkey;
+}
+
+pgp_key_t *
+rnp_key_store_get_signer_key(rnp_key_store_t *store, const pgp_signature_t *sig)
+{
+    pgp_key_search_t search = {};
+    // prefer using the issuer fingerprint when available
+    if (signature_has_keyfp(sig) && signature_get_keyfp(sig, &search.by.fingerprint)) {
+        search.type = PGP_KEY_SEARCH_FINGERPRINT;
+        return rnp_key_store_search(store, &search, NULL);
+    }
+    // fall back to key id search
+    if (signature_get_keyid(sig, search.by.keyid)) {
+        search.type = PGP_KEY_SEARCH_KEYID;
+        return rnp_key_store_search(store, &search, NULL);
+    }
+    return NULL;
+}
+
+pgp_key_t *
+rnp_key_store_import_signature(rnp_key_store_t *        keyring,
+                               const pgp_signature_t *  sig,
+                               pgp_sig_import_status_t *status)
+{
+    pgp_key_t *             res_key = NULL;
+    pgp_key_t               tmpkey = {};
+    pgp_sig_import_status_t res_status = PGP_SIG_IMPORT_STATUS_UNKNOWN;
+    pgp_sig_type_t          sigtype = signature_get_type(sig);
+    size_t                  expackets = 0;
+
+    /* we support only direct-key and key revocation signatures here */
+    if ((sigtype != PGP_SIG_DIRECT) && (sigtype != PGP_SIG_REV_KEY)) {
+        goto done;
+    }
+    res_key = rnp_key_store_get_signer_key(keyring, sig);
+    if (!res_key) {
+        res_status = PGP_SIG_IMPORT_STATUS_UNKNOWN_KEY;
+        goto done;
+    }
+    if (!pgp_key_from_pkt(&tmpkey, &res_key->pkt) || !rnp_key_add_signature(&tmpkey, sig)) {
+        goto done;
+    }
+
+    expackets = pgp_key_get_rawpacket_count(res_key);
+    if (!(res_key = rnp_key_store_add_key(keyring, &tmpkey))) {
+        RNP_LOG("failed to add key with imported sig to the keyring");
+        goto done;
+    }
+    res_status = (pgp_key_get_rawpacket_count(res_key) > expackets) ?
+                   PGP_SIG_IMPORT_STATUS_NEW :
+                   PGP_SIG_IMPORT_STATUS_UNCHANGED;
+done:
+    pgp_key_free_data(&tmpkey);
+    if (status) {
+        *status = res_status;
+    }
+    return res_key;
 }
 
 bool

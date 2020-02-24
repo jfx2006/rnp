@@ -269,6 +269,12 @@ void test_ffi_detached_verify_input(void **state);
 
 void test_ffi_op_verify_sig_count(void **state);
 
+void test_ffi_import_signatures(void **state);
+
+void test_ffi_export_revocation(void **state);
+
+void test_ffi_secret_sig_import(void **state);
+
 void test_dsa_roundtrip(void **state);
 
 void test_dsa_verify_negative(void **state);
@@ -322,6 +328,10 @@ void test_cli_examples(void **state);
 void test_cli_dump(void **state);
 
 void test_large_packet(void **state);
+
+void test_large_mpi_rsa_pub(void **state);
+
+void test_large_mpi_rsa_priv(void **state);
 
 void test_partial_length_signature(void **state);
 

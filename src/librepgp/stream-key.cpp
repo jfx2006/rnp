@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2018-2020, [Ribose Inc](https://www.ribose.com).
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification,
@@ -43,15 +43,6 @@
 #include "crypto.h"
 #include "crypto/signatures.h"
 #include "../librekey/key_store_pgp.h"
-
-static void
-signature_list_destroy(list *sigs)
-{
-    for (list_item *li = list_front(*sigs); li; li = list_next(li)) {
-        free_signature((pgp_signature_t *) li);
-    }
-    list_destroy(sigs);
-}
 
 void
 transferable_subkey_destroy(pgp_transferable_subkey_t *subkey)
@@ -345,7 +336,7 @@ transferable_key_add_userid(pgp_transferable_key_t *key, const char *userid)
     pgp_userid_pkt_t           uid = {};
     pgp_transferable_userid_t *tuid = NULL;
 
-    uid.tag = PGP_PTAG_CT_USER_ID;
+    uid.tag = PGP_PKT_USER_ID;
     uid.uid_len = strlen(userid);
     if (!(uid.uid = (uint8_t *) malloc(uid.uid_len))) {
         return NULL;
@@ -630,6 +621,79 @@ end:
     return res;
 }
 
+pgp_signature_t *
+transferable_key_revoke(const pgp_key_pkt_t *key,
+                        const pgp_key_pkt_t *signer,
+                        pgp_hash_alg_t       hash_alg,
+                        const pgp_revoke_t * revoke)
+{
+    pgp_signature_t * sig = NULL;
+    bool              res = false;
+    pgp_hash_t        hash = {};
+    uint8_t           keyid[PGP_KEY_ID_SIZE];
+    pgp_fingerprint_t keyfp;
+    rng_t             rng = {};
+
+    if (!key || !signer || !revoke) {
+        RNP_LOG("invalid parameters");
+        return NULL;
+    }
+    if (!rng_init(&rng, RNG_SYSTEM)) {
+        RNP_LOG("RNG init failed");
+        return NULL;
+    }
+    sig = (pgp_signature_t *) calloc(1, sizeof(*sig));
+    if (!sig) {
+        RNP_LOG("allocation failed");
+        goto end;
+    }
+    if (pgp_keyid(keyid, sizeof(keyid), signer)) {
+        RNP_LOG("failed to calculate keyid");
+        goto end;
+    }
+    if (pgp_fingerprint(&keyfp, signer)) {
+        RNP_LOG("failed to calculate keyfp");
+        goto end;
+    }
+
+    sig->version = PGP_V4;
+    sig->halg = pgp_hash_adjust_alg_to_key(hash_alg, signer);
+    sig->palg = signer->alg;
+    sig->type = is_primary_key_pkt(key->tag) ? PGP_SIG_REV_KEY : PGP_SIG_REV_SUBKEY;
+
+    if (!signature_set_keyfp(sig, &keyfp)) {
+        RNP_LOG("failed to set issuer fingerprint");
+        goto end;
+    }
+    if (!signature_set_creation(sig, time(NULL))) {
+        RNP_LOG("failed to set creation time");
+        goto end;
+    }
+    if (!signature_set_revocation_reason(sig, revoke->code, revoke->reason)) {
+        RNP_LOG("failed to set revocation reason");
+        goto end;
+    }
+    if (!signature_set_keyid(sig, keyid)) {
+        RNP_LOG("failed to set issuer key id");
+        goto end;
+    }
+
+    if (!signature_fill_hashed_data(sig) || !signature_hash_direct(sig, key, &hash) ||
+        signature_calculate(sig, &signer->material, &hash, &rng)) {
+        RNP_LOG("failed to calculate signature");
+        goto end;
+    }
+    res = true;
+end:
+    rng_destroy(&rng);
+    if (!res && sig) {
+        free_signature(sig);
+        free(sig);
+        sig = NULL;
+    }
+    return sig;
+}
+
 void
 transferable_key_destroy(pgp_transferable_key_t *key)
 {
@@ -662,7 +726,7 @@ static rnp_result_t
 process_pgp_key_trusts(pgp_source_t *src)
 {
     rnp_result_t ret;
-    while (stream_pkt_type(src) == PGP_PTAG_CT_TRUST) {
+    while (stream_pkt_type(src) == PGP_PKT_TRUST) {
         if ((ret = stream_skip_packet(src))) {
             RNP_LOG("failed to skip trust packet");
             return ret;
@@ -677,7 +741,7 @@ process_pgp_key_signatures(pgp_source_t *src, list *sigs)
     int          ptag;
     rnp_result_t ret = RNP_ERROR_BAD_FORMAT;
 
-    while ((ptag = stream_pkt_type(src)) == PGP_PTAG_CT_SIGNATURE) {
+    while ((ptag = stream_pkt_type(src)) == PGP_PKT_SIGNATURE) {
         pgp_signature_t *sig = (pgp_signature_t *) list_append(sigs, NULL, sizeof(*sig));
         if (!sig) {
             RNP_LOG("sig alloc failed");
@@ -706,7 +770,7 @@ process_pgp_userid(pgp_source_t *src, pgp_transferable_userid_t *uid)
     memset(uid, 0, sizeof(*uid));
     ptag = stream_pkt_type(src);
 
-    if ((ptag != PGP_PTAG_CT_USER_ID) && (ptag != PGP_PTAG_CT_USER_ATTR)) {
+    if ((ptag != PGP_PKT_USER_ID) && (ptag != PGP_PKT_USER_ATTR)) {
         RNP_LOG("wrong uid ptag: %d", ptag);
         return RNP_ERROR_BAD_FORMAT;
     }
@@ -804,8 +868,8 @@ armoredpass:
             goto finish;
         }
 
-        has_secret |= (ptag == PGP_PTAG_CT_SECRET_KEY);
-        has_public |= (ptag == PGP_PTAG_CT_PUBLIC_KEY);
+        has_secret |= (ptag == PGP_PKT_SECRET_KEY);
+        has_public |= (ptag == PGP_PKT_PUBLIC_KEY);
     }
 
     /* file may have multiple armored keys */
@@ -876,7 +940,7 @@ process_pgp_key(pgp_source_t *src, pgp_transferable_key_t *key)
 
     /* user ids/attrs with signatures */
     while ((ptag = stream_pkt_type(src))) {
-        if ((ptag != PGP_PTAG_CT_USER_ID) && (ptag != PGP_PTAG_CT_USER_ATTR)) {
+        if ((ptag != PGP_PKT_USER_ID) && (ptag != PGP_PKT_USER_ATTR)) {
             break;
         }
 
@@ -1313,7 +1377,7 @@ encrypt_secret_key(pgp_key_pkt_t *key, const char *password, rng_t *rng)
     }
 
     /* build secret key data */
-    if (!init_packet_body(&body, 0)) {
+    if (!init_packet_body(&body, PGP_PKT_RESERVED)) {
         return RNP_ERROR_OUT_OF_MEMORY;
     }
     if (!write_secret_key_mpis(&body, key)) {

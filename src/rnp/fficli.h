@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2019-2020, [Ribose Inc](https://www.ribose.com).
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification,
@@ -40,14 +40,16 @@ extern "C" {
 
 typedef struct cli_rnp_t {
     rnp_ffi_t ffi;
-    FILE *    resfp;     /* where to put result messages, defaults to stdout */
-    FILE *    passfp;    /* file pointer for password input */
-    int       pswdtries; /* number of password tries, -1 for unlimited */
-    char *    pubpath;   /* path to the public keyring */
-    char *    pubformat; /* format of the public keyring */
-    char *    secpath;   /* path to the secret keyring */
-    char *    secformat; /* format of the secret keyring */
-    char *    defkey;    /* default key id */
+    FILE *    resfp;      /* where to put result messages, defaults to stdout */
+    FILE *    passfp;     /* file pointer for password input */
+    FILE *    userio_in;  /* file pointer for user's inputs */
+    FILE *    userio_out; /* file pointer for user's outputs */
+    int       pswdtries;  /* number of password tries, -1 for unlimited */
+    char *    pubpath;    /* path to the public keyring */
+    char *    pubformat;  /* format of the public keyring */
+    char *    secpath;    /* path to the secret keyring */
+    char *    secformat;  /* format of the secret keyring */
+    char *    defkey;     /* default key id */
 } cli_rnp_t;
 
 /**
@@ -61,6 +63,7 @@ typedef struct cli_rnp_t {
 bool cli_cfg_set_keystore_info(rnp_cfg_t *cfg);
 
 bool cli_rnp_init(cli_rnp_t *, rnp_cfg_t *);
+bool cli_rnp_baseinit(cli_rnp_t *);
 void cli_rnp_end(cli_rnp_t *);
 bool cli_rnp_load_keyrings(cli_rnp_t *rnp, bool loadsecret);
 bool cli_rnp_save_keyrings(cli_rnp_t *rnp);
@@ -69,9 +72,10 @@ void cli_rnp_print_key_info(
   FILE *fp, rnp_ffi_t ffi, rnp_key_handle_t key, bool psecret, bool psigs);
 bool cli_rnp_set_generate_params(rnp_cfg_t *cfg);
 bool cli_rnp_generate_key(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *username);
-list cli_rnp_get_keylist(cli_rnp_t *rnp, const char *filter, bool secret);
+list cli_rnp_get_keylist(cli_rnp_t *rnp, const char *filter, bool secret, bool subkeys);
 void cli_rnp_keylist_destroy(list *keys);
 bool cli_rnp_export_keys(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *filter);
+bool cli_rnp_export_revocation(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *key);
 bool cli_rnp_add_key(const rnp_cfg_t *cfg, cli_rnp_t *rnp);
 bool cli_rnp_dump_file(const rnp_cfg_t *cfg);
 bool cli_rnp_armor_file(const rnp_cfg_t *cfg);

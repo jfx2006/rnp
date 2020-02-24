@@ -44,14 +44,6 @@ typedef struct pgp_signature_info_t {
     bool             signer_valid; /* assume that signing key is valid */
 } pgp_signature_info_t;
 
-typedef struct pgp_signatures_info_t {
-    list     sigs; /* list of pgp_signature_info_t structures, struct owns them */
-    unsigned validc;
-    unsigned expiredc;
-    unsigned invalidc;
-    unsigned unknownc;
-} pgp_signatures_info_t;
-
 /**
  * @brief Check whether signature packet matches one-pass signature packet.
  * @param sig pointer to the read signature packet
@@ -291,7 +283,13 @@ char *signature_get_key_server(const pgp_signature_t *sig);
 
 bool signature_has_revocation_reason(const pgp_signature_t *sig);
 
-bool signature_get_revocation_reason(const pgp_signature_t *sig, uint8_t *code, char **reason);
+bool signature_get_revocation_reason(const pgp_signature_t *sig,
+                                     pgp_revocation_type_t *code,
+                                     char **                reason);
+
+bool signature_set_revocation_reason(pgp_signature_t *     sig,
+                                     pgp_revocation_type_t code,
+                                     const char *          reason);
 
 /**
  * @brief Fill signature's hashed data. This includes all the fields from signature which are
@@ -369,14 +367,21 @@ rnp_result_t signature_check_subkey_revocation(pgp_signature_info_t *sinfo,
                                                const pgp_key_pkt_t * subkey);
 
 /**
- * @brief Check whether signatures info structure has all correct signatures.
+ * @brief Destroy list of pgp_signature_t structures.
  *
- * @param info populated signatures info
- * @return true if all signatures are valid and there is at least one signature
- * @return false if there are invalid, unknown or expired signature(s)
+ * @param sigs list of signatures, can be NULL.
  */
-bool check_signatures_info(const pgp_signatures_info_t *info);
+void signature_list_destroy(list *sigs);
 
-void free_signatures_info(pgp_signatures_info_t *info);
+/**
+ * @brief Parse stream with signatures to the signatures list.
+ *        Can handle binary or armored stream with signatures, including stream with multiple
+ * armored signatures.
+ *
+ * @param src signatures stream, cannot be NULL.
+ * @param sigs on success parsed signature structures will be put here.
+ * @return RNP_SUCCESS or error code otherwise.
+ */
+rnp_result_t process_pgp_signatures(pgp_source_t *src, list *sigs);
 
 #endif

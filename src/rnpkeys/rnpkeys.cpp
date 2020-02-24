@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2017-2020, [Ribose Inc](https://www.ribose.com).
  * Copyright (c) 2009 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -49,8 +49,9 @@ extern const char *rnp_keys_progname;
 
 const char *usage = "--help OR\n"
                     "\t--export-key [options] OR\n"
+                    "\t--export-rev [options] OR\n"
                     "\t--generate-key [options] OR\n"
-                    "\t--import-key [options] OR\n"
+                    "\t--import, --import-keys, --import-sigs [options] OR\n"
                     "\t--list-keys [options] OR\n"
                     "\t--version\n"
                     "where options are:\n"
@@ -65,6 +66,7 @@ const char *usage = "--help OR\n"
                     "\t[--output=file] file OR\n"
                     "\t[--keystore-format=<format>] AND/OR\n"
                     "\t[--userid=<userid>] AND/OR\n"
+                    "\t[--rev-type, --rev-reason] AND/OR\n"
                     "\t[--verbose]\n";
 
 struct option options[] = {
@@ -72,12 +74,16 @@ struct option options[] = {
   {"list-keys", no_argument, NULL, CMD_LIST_KEYS},
   {"export", no_argument, NULL, CMD_EXPORT_KEY},
   {"export-key", optional_argument, NULL, CMD_EXPORT_KEY},
-  {"import", no_argument, NULL, CMD_IMPORT_KEY},
-  {"import-key", no_argument, NULL, CMD_IMPORT_KEY},
+  {"import", no_argument, NULL, CMD_IMPORT},
+  {"import-key", no_argument, NULL, CMD_IMPORT_KEYS},
+  {"import-keys", no_argument, NULL, CMD_IMPORT_KEYS},
+  {"import-sigs", no_argument, NULL, CMD_IMPORT_SIGS},
   {"gen", optional_argument, NULL, CMD_GENERATE_KEY},
   {"gen-key", optional_argument, NULL, CMD_GENERATE_KEY},
   {"generate", optional_argument, NULL, CMD_GENERATE_KEY},
   {"generate-key", optional_argument, NULL, CMD_GENERATE_KEY},
+  {"export-rev", no_argument, NULL, CMD_EXPORT_REV},
+  {"export-revocation", no_argument, NULL, CMD_EXPORT_REV},
   /* debugging commands */
   {"help", no_argument, NULL, CMD_HELP},
   {"version", no_argument, NULL, CMD_VERSION},
@@ -104,6 +110,8 @@ struct option options[] = {
   {"output", required_argument, NULL, OPT_OUTPUT},
   {"force", no_argument, NULL, OPT_FORCE},
   {"secret", no_argument, NULL, OPT_SECRET},
+  {"rev-type", required_argument, NULL, OPT_REV_TYPE},
+  {"rev-reason", required_argument, NULL, OPT_REV_REASON},
   {NULL, 0, NULL, 0},
 };
 
@@ -115,7 +123,7 @@ print_keys_info(rnp_cfg_t *cfg, cli_rnp_t *rnp, FILE *fp, const char *filter)
     int  keyc;
     bool psecret = rnp_cfg_getbool(cfg, CFG_SECRET);
 
-    keys = cli_rnp_get_keylist(rnp, filter, psecret);
+    keys = cli_rnp_get_keylist(rnp, filter, psecret, true);
     if (!keys) {
         fprintf(fp, "Key(s) not found.\n");
         return false;
@@ -155,7 +163,7 @@ import_keys(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file)
     bool        res = false;
 
     if (rnp_input_from_path(&input, file)) {
-        (void) fprintf(stderr, "failed to open file %s\n", file);
+        ERR_MSG("failed to open file %s", file);
         return false;
     }
 
@@ -165,13 +173,13 @@ import_keys(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file)
     json_object *keys = NULL;
 
     if (rnp_import_keys(rnp->ffi, input, flags, &results)) {
-        (void) fprintf(stderr, "failed to import keys from file %s\n", file);
+        ERR_MSG("failed to import keys from file %s", file);
         goto done;
     }
     // print information about imported key(s)
     jso = json_tokener_parse(results);
     if (!jso || !json_object_object_get_ex(jso, "keys", &keys)) {
-        (void) fprintf(stderr, "invalid key import result\n");
+        ERR_MSG("invalid key import result");
         goto done;
     }
 
@@ -183,7 +191,7 @@ import_keys(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file)
         }
         const char *fphex = json_obj_get_str(keyinfo, "fingerprint");
         if (rnp_locate_key(rnp->ffi, "fingerprint", fphex, &key) || !key) {
-            (void) fprintf(stderr, "failed to locate key with fingerprint %s\n", fphex);
+            ERR_MSG("failed to locate key with fingerprint %s", fphex);
             continue;
         }
         cli_rnp_print_key_info(stdout, rnp->ffi, key, true, false);
@@ -197,7 +205,7 @@ import_keys(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file)
 
     // save public and secret keyrings
     if (!cli_rnp_save_keyrings(rnp)) {
-        (void) fprintf(stderr, "failed to save keyrings\n");
+        ERR_MSG("failed to save keyrings");
         goto done;
     }
     res = true;
@@ -208,13 +216,112 @@ done:
     return res;
 }
 
+static bool
+import_sigs(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file)
+{
+    rnp_input_t input = NULL;
+    bool        res = false;
+
+    if (rnp_input_from_path(&input, file)) {
+        ERR_MSG("Failed to open file %s", file);
+        return false;
+    }
+
+    char *       results = NULL;
+    json_object *jso = NULL;
+    json_object *sigs = NULL;
+    int          unknown_sigs = 0;
+    int          new_sigs = 0;
+    int          old_sigs = 0;
+
+    if (rnp_import_signatures(rnp->ffi, input, 0, &results)) {
+        ERR_MSG("Failed to import signatures from file %s", file);
+        goto done;
+    }
+    // print information about imported signature(s)
+    jso = json_tokener_parse(results);
+    if (!jso || !json_object_object_get_ex(jso, "sigs", &sigs)) {
+        ERR_MSG("Invalid signature import result");
+        goto done;
+    }
+
+    for (size_t idx = 0; idx < (size_t) json_object_array_length(sigs); idx++) {
+        json_object *siginfo = json_object_array_get_idx(sigs, idx);
+        if (!siginfo) {
+            continue;
+        }
+        const char *status = json_obj_get_str(siginfo, "public");
+        std::string pub_status = status ? status : "unknown";
+        status = json_obj_get_str(siginfo, "secret");
+        std::string sec_status = status ? status : "unknown";
+
+        if ((pub_status == "new") || (sec_status == "new")) {
+            new_sigs++;
+        } else if ((pub_status == "unchanged") || (sec_status == "unchanged")) {
+            old_sigs++;
+        } else {
+            unknown_sigs++;
+        }
+    }
+
+    // print status information
+    ERR_MSG("Import finished: %d new signature%s, %d unchanged, %d unknown.",
+            new_sigs,
+            (new_sigs != 1) ? "s" : "",
+            old_sigs,
+            unknown_sigs);
+
+    // save public and secret keyrings
+    if ((new_sigs > 0) && !cli_rnp_save_keyrings(rnp)) {
+        ERR_MSG("Failed to save keyrings");
+        goto done;
+    }
+    res = true;
+done:
+    json_object_put(jso);
+    rnp_buffer_destroy(results);
+    rnp_input_destroy(input);
+    return res;
+}
+
+static bool
+import(rnp_cfg_t *cfg, cli_rnp_t *rnp, const char *file, int cmd)
+{
+    if (!file) {
+        ERR_MSG("Import file isn't specified");
+        return false;
+    }
+
+    if (cmd == CMD_IMPORT_KEYS) {
+        return import_keys(cfg, rnp, file);
+    }
+    if (cmd == CMD_IMPORT_SIGS) {
+        return import_sigs(cfg, rnp, file);
+    }
+
+    rnp_input_t input = NULL;
+    if (rnp_input_from_path(&input, file)) {
+        ERR_MSG("Failed to open file %s", file);
+        return false;
+    }
+
+    char *contents = NULL;
+    if (rnp_guess_contents(input, &contents)) {
+        ERR_MSG("Warning! Failed to guess content type to import. Assuming keys.");
+    }
+    rnp_input_destroy(input);
+    bool signature = contents && !strcmp(contents, "signature");
+    rnp_buffer_destroy(contents);
+
+    return signature ? import_sigs(cfg, rnp, file) : import_keys(cfg, rnp, file);
+}
+
 void
 print_praise(void)
 {
-    (void) fprintf(stderr,
-                   "%s\nAll bug reports, praise and chocolate, please, to:\n%s\n",
-                   PACKAGE_STRING,
-                   PACKAGE_BUGREPORT);
+    ERR_MSG("%s\nAll bug reports, praise and chocolate, please, to:\n%s",
+            PACKAGE_STRING,
+            PACKAGE_BUGREPORT);
 }
 
 /* print a usage message */
@@ -222,7 +329,7 @@ void
 print_usage(const char *usagemsg)
 {
     print_praise();
-    (void) fprintf(stderr, "Usage: %s %s", rnp_keys_progname, usagemsg);
+    ERR_MSG("Usage: %s %s", rnp_keys_progname, usagemsg);
 }
 
 /* do a command once for a specified file 'f' */
@@ -250,17 +357,15 @@ rnp_cmd(rnp_cfg_t *cfg, cli_rnp_t *rnp, optdefs_t cmd, const char *f)
             }
         }
         if (!key) {
-            (void) fprintf(stderr, "key '%s' not found\n", f);
+            ERR_MSG("key '%s' not found", f);
             return 0;
         }
         return cli_rnp_export_keys(cfg, rnp, key);
     }
-    case CMD_IMPORT_KEY:
-        if (f == NULL) {
-            (void) fprintf(stderr, "import file isn't specified\n");
-            return false;
-        }
-        return import_keys(cfg, rnp, f);
+    case CMD_IMPORT:
+    case CMD_IMPORT_KEYS:
+    case CMD_IMPORT_SIGS:
+        return import(cfg, rnp, f, cmd);
     case CMD_GENERATE_KEY: {
         if (f == NULL) {
             list *ids = NULL;
@@ -268,12 +373,19 @@ rnp_cmd(rnp_cfg_t *cfg, cli_rnp_t *rnp, optdefs_t cmd, const char *f)
                 if (list_length(*ids) == 1) {
                     f = (fs = rnp_cfg_getlist_string(cfg, CFG_USERID, 0)).c_str();
                 } else {
-                    fprintf(stderr, "Only single userid is supported for generated keys\n");
+                    ERR_MSG("Only single userid is supported for generated keys");
                     return false;
                 }
             }
         }
         return cli_rnp_generate_key(cfg, rnp, f);
+    }
+    case CMD_EXPORT_REV: {
+        if (!f) {
+            ERR_MSG("You need to specify key to generate revocation for.");
+            return false;
+        }
+        return cli_rnp_export_revocation(cfg, rnp, f);
     }
     case CMD_VERSION:
         print_praise();
@@ -304,7 +416,10 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
         break;
     case CMD_LIST_KEYS:
     case CMD_EXPORT_KEY:
-    case CMD_IMPORT_KEY:
+    case CMD_EXPORT_REV:
+    case CMD_IMPORT:
+    case CMD_IMPORT_KEYS:
+    case CMD_IMPORT_SIGS:
     case CMD_HELP:
     case CMD_VERSION:
         *cmd = (optdefs_t) val;
@@ -313,14 +428,14 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     /* options */
     case OPT_KEY_STORE_FORMAT:
         if (arg == NULL) {
-            (void) fprintf(stderr, "No keyring format argument provided\n");
+            ERR_MSG("No keyring format argument provided");
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_KEYSTOREFMT, arg);
         break;
     case OPT_USERID:
         if (arg == NULL) {
-            (void) fprintf(stderr, "no userid argument provided\n");
+            ERR_MSG("no userid argument provided");
             break;
         }
         ret = rnp_cfg_addstr(cfg, CFG_USERID, arg);
@@ -330,19 +445,19 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
         break;
     case OPT_HOMEDIR:
         if (arg == NULL) {
-            (void) fprintf(stderr, "no home directory argument provided\n");
+            ERR_MSG("no home directory argument provided");
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_HOMEDIR, arg);
         break;
     case OPT_NUMBITS: {
         if (arg == NULL) {
-            (void) fprintf(stderr, "no number of bits argument provided\n");
+            ERR_MSG("no number of bits argument provided");
             break;
         }
         int bits = atoi(arg);
         if ((bits < 1024) || (bits > 16384)) {
-            (void) fprintf(stderr, "wrong bits value: %s\n", arg);
+            ERR_MSG("wrong bits value: %s", arg);
             break;
         }
         ret = rnp_cfg_setint(cfg, CFG_NUMBITS, bits);
@@ -350,12 +465,12 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     }
     case OPT_HASH_ALG: {
         if (arg == NULL) {
-            (void) fprintf(stderr, "No hash algorithm argument provided\n");
+            ERR_MSG("No hash algorithm argument provided");
             break;
         }
         bool supported = false;
         if (rnp_supports_feature("hash algorithm", arg, &supported) || !supported) {
-            (void) fprintf(stderr, "Unsupported hash algorithm: %s\n", arg);
+            ERR_MSG("Unsupported hash algorithm: %s", arg);
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_HASH, arg);
@@ -363,12 +478,12 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     }
     case OPT_S2K_ITER: {
         if (arg == NULL) {
-            (void) fprintf(stderr, "No s2k iteration argument provided\n");
+            ERR_MSG("No s2k iteration argument provided");
             break;
         }
         int iterations = atoi(arg);
         if (!iterations) {
-            (void) fprintf(stderr, "Wrong iterations value: %s\n", arg);
+            ERR_MSG("Wrong iterations value: %s", arg);
             break;
         }
         ret = rnp_cfg_setint(cfg, CFG_S2K_ITER, iterations);
@@ -376,12 +491,12 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     }
     case OPT_S2K_MSEC: {
         if (arg == NULL) {
-            (void) fprintf(stderr, "No s2k msec argument provided\n");
+            ERR_MSG("No s2k msec argument provided");
             break;
         }
         int msec = atoi(arg);
         if (!msec) {
-            (void) fprintf(stderr, "Invalid s2k msec value: %s\n", arg);
+            ERR_MSG("Invalid s2k msec value: %s", arg);
             break;
         }
         ret = rnp_cfg_setint(cfg, CFG_S2K_MSEC, atoi(arg));
@@ -389,14 +504,14 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     }
     case OPT_PASSWDFD:
         if (arg == NULL) {
-            (void) fprintf(stderr, "no pass-fd argument provided\n");
+            ERR_MSG("no pass-fd argument provided");
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_PASSFD, arg);
         break;
     case OPT_RESULTS:
         if (arg == NULL) {
-            (void) fprintf(stderr, "No output filename argument provided\n");
+            ERR_MSG("No output filename argument provided");
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_IO_RESS, arg);
@@ -407,7 +522,7 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
     case OPT_CIPHER: {
         bool supported = false;
         if (rnp_supports_feature("symmetric algorithm", arg, &supported) || !supported) {
-            (void) fprintf(stderr, "Unsupported symmetric algorithm: %s\n", arg);
+            ERR_MSG("Unsupported symmetric algorithm: %s", arg);
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_CIPHER, arg);
@@ -418,7 +533,7 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
         break;
     case OPT_OUTPUT:
         if (arg == NULL) {
-            (void) fprintf(stderr, "No output filename argument provided\n");
+            ERR_MSG("No output filename argument provided");
             break;
         }
         ret = rnp_cfg_setstr(cfg, CFG_OUTFILE, arg);
@@ -431,6 +546,27 @@ setoption(rnp_cfg_t *cfg, optdefs_t *cmd, int val, const char *arg)
         break;
     case OPT_WITH_SIGS:
         ret = rnp_cfg_setbool(cfg, CFG_WITH_SIGS, true);
+        break;
+    case OPT_REV_TYPE: {
+        if (!arg) {
+            ERR_MSG("No revocation type argument provided");
+            break;
+        }
+        std::string revtype = arg;
+        if (revtype == "0") {
+            revtype = "no";
+        } else if (revtype == "1") {
+            revtype = "superseded";
+        } else if (revtype == "2") {
+            revtype = "compromised";
+        } else if (revtype == "3") {
+            revtype = "retired";
+        }
+        ret = rnp_cfg_setstr(cfg, CFG_REV_TYPE, revtype.c_str());
+        break;
+    }
+    case OPT_REV_REASON:
+        ret = rnp_cfg_setstr(cfg, CFG_REV_REASON, arg);
         break;
     default:
         *cmd = CMD_HELP;
@@ -455,7 +591,7 @@ parse_option(rnp_cfg_t *cfg, optdefs_t *cmd, const char *s)
     if (!compiled) {
         compiled = 1;
         if (regcomp(&opt, "([^=]{1,128})(=(.*))?", REG_EXTENDED) != 0) {
-            fprintf(stderr, "Can't compile regex\n");
+            ERR_MSG("Can't compile regex");
             return false;
         }
     }

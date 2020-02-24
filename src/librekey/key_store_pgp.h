@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2020 [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2017-2020, [Ribose Inc](https://www.ribose.com).
  * Copyright (c) 2009 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
@@ -77,6 +77,8 @@ bool rnp_key_from_transferable_subkey(pgp_key_t *                subkey,
                                       pgp_key_t *                primary);
 
 bool rnp_key_add_transferable_userid(pgp_key_t *key, pgp_transferable_userid_t *uid);
+
+bool rnp_key_add_signature(pgp_key_t *key, const pgp_signature_t *sig);
 
 bool rnp_key_write_packets_stream(const pgp_key_t *key, pgp_dest_t *dst);
 

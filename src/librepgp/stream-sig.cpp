@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, [Ribose Inc](https://www.ribose.com).
+ * Copyright (c) 2018-2020, [Ribose Inc](https://www.ribose.com).
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification,
@@ -33,6 +33,7 @@
 #include "types.h"
 #include "stream-sig.h"
 #include "stream-packet.h"
+#include "stream-armor.h"
 #include "pgp-key.h"
 #include "crypto/signatures.h"
 
@@ -791,7 +792,9 @@ signature_has_revocation_reason(const pgp_signature_t *sig)
 }
 
 bool
-signature_get_revocation_reason(const pgp_signature_t *sig, uint8_t *code, char **reason)
+signature_get_revocation_reason(const pgp_signature_t *sig,
+                                pgp_revocation_type_t *code,
+                                char **                reason)
 {
     pgp_sig_subpkt_t *subpkt;
 
@@ -816,6 +819,26 @@ signature_get_revocation_reason(const pgp_signature_t *sig, uint8_t *code, char 
 }
 
 bool
+signature_set_revocation_reason(pgp_signature_t *     sig,
+                                pgp_revocation_type_t code,
+                                const char *          reason)
+{
+    size_t            datalen = 1 + (reason ? strlen(reason) : 0);
+    pgp_sig_subpkt_t *subpkt =
+      signature_add_subpkt(sig, PGP_SIG_SUBPKT_REVOCATION_REASON, datalen, true);
+    if (!subpkt) {
+        return false;
+    }
+
+    subpkt->hashed = 1;
+    subpkt->data[0] = code;
+    if (reason) {
+        memcpy(subpkt->data + 1, reason, strlen(reason));
+    }
+    return signature_parse_subpacket(subpkt);
+}
+
+bool
 signature_fill_hashed_data(pgp_signature_t *sig)
 {
     pgp_packet_body_t hbody;
@@ -831,7 +854,7 @@ signature_fill_hashed_data(pgp_signature_t *sig)
         return false;
     }
 
-    if (!init_packet_body(&hbody, 0)) {
+    if (!init_packet_body(&hbody, PGP_PKT_RESERVED)) {
         RNP_LOG("allocation failed");
         return false;
     }
@@ -862,7 +885,7 @@ bool
 signature_hash_key(const pgp_key_pkt_t *key, pgp_hash_t *hash)
 {
     uint8_t       hdr[3] = {0x99, 0x00, 0x00};
-    pgp_key_pkt_t keycp = {0};
+    pgp_key_pkt_t keycp = {};
     bool          res = false;
 
     if (!key || !hash) {
@@ -898,10 +921,10 @@ signature_hash_userid(const pgp_userid_pkt_t *uid, pgp_hash_t *hash, pgp_version
     }
 
     switch (uid->tag) {
-    case PGP_PTAG_CT_USER_ID:
+    case PGP_PKT_USER_ID:
         hdr[0] = 0xB4;
         break;
-    case PGP_PTAG_CT_USER_ATTR:
+    case PGP_PKT_USER_ATTR:
         hdr[0] = 0xD1;
         break;
     default:
@@ -1274,21 +1297,72 @@ signature_check_subkey_revocation(pgp_signature_info_t *sinfo,
     return signature_check(sinfo, &hash);
 }
 
-bool
-check_signatures_info(const pgp_signatures_info_t *info)
+void
+signature_list_destroy(list *sigs)
 {
-    return list_length(info->sigs) && !info->unknownc && !info->invalidc && !info->expiredc &&
-           (info->validc == list_length(info->sigs));
+    for (list_item *li = list_front(*sigs); li; li = list_next(li)) {
+        free_signature((pgp_signature_t *) li);
+    }
+    list_destroy(sigs);
 }
 
-void
-free_signatures_info(pgp_signatures_info_t *info)
+rnp_result_t
+process_pgp_signatures(pgp_source_t *src, list *sigs)
 {
-    for (list_item *si = list_front(info->sigs); si; si = list_next(si)) {
-        pgp_signature_info_t *sinfo = (pgp_signature_info_t *) si;
-        free_signature(sinfo->sig);
-        free(sinfo->sig);
+    bool             armored = false;
+    pgp_source_t     armorsrc = {0};
+    pgp_source_t *   origsrc = src;
+    pgp_signature_t *cursig = NULL;
+    rnp_result_t     ret = RNP_ERROR_GENERIC;
+
+    *sigs = NULL;
+    /* check whether signatures are armored */
+armoredpass:
+    if (is_armored_source(src)) {
+        if ((ret = init_armored_src(&armorsrc, src))) {
+            RNP_LOG("failed to parse armored data");
+            goto finish;
+        }
+        armored = true;
+        src = &armorsrc;
     }
-    list_destroy(&info->sigs);
-    memset(info, 0, sizeof(*info));
+
+    /* read sequence of OpenPGP signatures */
+    while (!src_eof(src) && !src_error(src)) {
+        int ptag = stream_pkt_type(src);
+
+        if (ptag != PGP_PKT_SIGNATURE) {
+            RNP_LOG("wrong signature tag: %d", ptag);
+            ret = RNP_ERROR_BAD_FORMAT;
+            goto finish;
+        }
+
+        if (!(cursig = (pgp_signature_t *) list_append(sigs, NULL, sizeof(*cursig)))) {
+            RNP_LOG("sig alloc failed");
+            ret = RNP_ERROR_OUT_OF_MEMORY;
+            goto finish;
+        }
+
+        if ((ret = stream_parse_signature(src, cursig))) {
+            list_remove((list_item *) cursig);
+            goto finish;
+        }
+    }
+
+    /* file may have multiple armored keys */
+    if (armored && !src_eof(origsrc) && is_armored_source(origsrc)) {
+        src_close(&armorsrc);
+        armored = false;
+        src = origsrc;
+        goto armoredpass;
+    }
+    ret = RNP_SUCCESS;
+finish:
+    if (armored) {
+        src_close(&armorsrc);
+    }
+    if (ret) {
+        signature_list_destroy(sigs);
+    }
+    return ret;
 }

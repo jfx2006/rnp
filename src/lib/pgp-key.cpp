@@ -62,7 +62,6 @@
 #include <librepgp/stream-key.h>
 #include <librepgp/stream-sig.h>
 #include <librepgp/stream-armor.h>
-#include "packet-create.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -179,7 +178,7 @@ pgp_subsig_free(pgp_subsig_t *subsig)
     free_signature(&subsig->sig);
 }
 
-static void
+void
 revoke_free(pgp_revoke_t *revoke)
 {
     if (!revoke) {
@@ -219,11 +218,11 @@ pgp_rawpacket_free(pgp_rawpacket_t *packet)
     packet->raw = NULL;
 }
 
-bool
-pgp_key_from_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt, const pgp_content_enum tag)
+static bool
+pgp_key_init_with_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt)
 {
     assert(!key->pkt.version);
-    assert(is_key_pkt(tag));
+    assert(is_key_pkt(pkt->tag));
     assert(pkt->material.alg);
     if (pgp_keyid(key->keyid, PGP_KEY_ID_SIZE, pkt) ||
         pgp_fingerprint(&key->fingerprint, pkt) ||
@@ -232,7 +231,45 @@ pgp_key_from_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt, const pgp_content_enu
     }
     /* this is correct since changes ownership */
     key->pkt = *pkt;
-    key->pkt.tag = tag;
+    return true;
+}
+
+bool
+pgp_key_from_pkt(pgp_key_t *key, const pgp_key_pkt_t *pkt)
+{
+    pgp_key_pkt_t keypkt = {};
+    memset(key, 0, sizeof(*key));
+
+    if (!copy_key_pkt(&keypkt, pkt, false)) {
+        RNP_LOG("failed to copy key packet");
+        return false;
+    }
+
+    /* parse secret key if not encrypted */
+    if (is_secret_key_pkt(keypkt.tag)) {
+        bool cleartext = keypkt.sec_protection.s2k.usage == PGP_S2KU_NONE;
+        if (cleartext && decrypt_secret_key(&keypkt, NULL)) {
+            RNP_LOG("failed to setup key fields");
+            free_key_pkt(&keypkt);
+            return false;
+        }
+    }
+
+    /* this call transfers ownership */
+    if (!pgp_key_init_with_pkt(key, &keypkt)) {
+        RNP_LOG("failed to setup key fields");
+        free_key_pkt(&keypkt);
+        return false;
+    }
+
+    /* add key rawpacket */
+    if (!pgp_key_add_key_rawpacket(key, &key->pkt)) {
+        free_key_pkt(&keypkt);
+        return false;
+    }
+
+    key->format = PGP_KEY_STORE_GPG;
+    key->key_flags = pgp_pk_alg_capabilities(pgp_key_get_alg(key));
     return true;
 }
 
@@ -622,7 +659,7 @@ pgp_key_get_version(const pgp_key_t *key)
     return key->pkt.version;
 }
 
-int
+pgp_pkt_type_t
 pgp_key_get_type(const pgp_key_t *key)
 {
     return key->pkt.tag;
@@ -925,7 +962,7 @@ pgp_key_get_subsig(const pgp_key_t *key, size_t idx)
 }
 
 pgp_rawpacket_t *
-pgp_key_add_rawpacket(pgp_key_t *key, void *data, size_t len, pgp_content_enum tag)
+pgp_key_add_rawpacket(pgp_key_t *key, void *data, size_t len, pgp_pkt_type_t tag)
 {
     pgp_rawpacket_t *packet;
     if (!(packet = (pgp_rawpacket_t *) list_append(&key->packets, NULL, sizeof(*packet)))) {
@@ -944,7 +981,7 @@ pgp_key_add_rawpacket(pgp_key_t *key, void *data, size_t len, pgp_content_enum t
 }
 
 pgp_rawpacket_t *
-pgp_key_add_stream_rawpacket(pgp_key_t *key, pgp_content_enum tag, pgp_dest_t *memdst)
+pgp_key_add_stream_rawpacket(pgp_key_t *key, pgp_pkt_type_t tag, pgp_dest_t *memdst)
 {
     pgp_rawpacket_t *res =
       pgp_key_add_rawpacket(key, mem_dest_get_memory(memdst), memdst->writeb, tag);
@@ -967,7 +1004,7 @@ pgp_key_add_key_rawpacket(pgp_key_t *key, pgp_key_pkt_t *pkt)
         dst_close(&dst, true);
         return NULL;
     }
-    return pgp_key_add_stream_rawpacket(key, (pgp_content_enum) pkt->tag, &dst);
+    return pgp_key_add_stream_rawpacket(key, (pgp_pkt_type_t) pkt->tag, &dst);
 }
 
 pgp_rawpacket_t *
@@ -982,7 +1019,7 @@ pgp_key_add_sig_rawpacket(pgp_key_t *key, const pgp_signature_t *pkt)
         dst_close(&dst, true);
         return NULL;
     }
-    return pgp_key_add_stream_rawpacket(key, PGP_PTAG_CT_SIGNATURE, &dst);
+    return pgp_key_add_stream_rawpacket(key, PGP_PKT_SIGNATURE, &dst);
 }
 
 pgp_rawpacket_t *
@@ -997,7 +1034,7 @@ pgp_key_add_uid_rawpacket(pgp_key_t *key, const pgp_userid_pkt_t *pkt)
         dst_close(&dst, true);
         return NULL;
     }
-    return pgp_key_add_stream_rawpacket(key, (pgp_content_enum) pkt->tag, &dst);
+    return pgp_key_add_stream_rawpacket(key, (pgp_pkt_type_t) pkt->tag, &dst);
 }
 
 size_t
@@ -1149,9 +1186,28 @@ pgp_key_lock(pgp_key_t *key)
 }
 
 static bool
+pgp_write_seckey(pgp_dest_t *   dst,
+                 pgp_pkt_type_t tag,
+                 pgp_key_pkt_t *seckey,
+                 const char *   password)
+{
+    bool           res = false;
+    pgp_pkt_type_t oldtag = seckey->tag;
+
+    seckey->tag = tag;
+    if (encrypt_secret_key(seckey, password, NULL)) {
+        goto done;
+    }
+    res = stream_write_key(seckey, dst);
+done:
+    seckey->tag = oldtag;
+    return res;
+}
+
+static bool
 write_key_to_rawpacket(pgp_key_pkt_t *        seckey,
                        pgp_rawpacket_t *      packet,
-                       pgp_content_enum       type,
+                       pgp_pkt_type_t         type,
                        pgp_key_store_format_t format,
                        const char *           password)
 {
@@ -1166,7 +1222,7 @@ write_key_to_rawpacket(pgp_key_pkt_t *        seckey,
     switch (format) {
     case PGP_KEY_STORE_GPG:
     case PGP_KEY_STORE_KBX:
-        if (!pgp_write_struct_seckey(&memdst, type, seckey, password)) {
+        if (!pgp_write_seckey(&memdst, type, seckey, password)) {
             RNP_LOG("failed to write seckey");
             goto done;
         }
@@ -1279,7 +1335,7 @@ pgp_key_protect(pgp_key_t *                  key,
     // write the protected key to packets[0]
     if (!write_key_to_rawpacket(decrypted_seckey,
                                 pgp_key_get_rawpacket(key, 0),
-                                (pgp_content_enum) pgp_key_get_type(key),
+                                pgp_key_get_type(key),
                                 format,
                                 new_password)) {
         goto done;
@@ -1324,11 +1380,8 @@ pgp_key_unprotect(pgp_key_t *key, const pgp_password_provider_t *password_provid
         seckey = decrypted_seckey;
     }
     seckey->sec_protection.s2k.usage = PGP_S2KU_NONE;
-    if (!write_key_to_rawpacket(seckey,
-                                pgp_key_get_rawpacket(key, 0),
-                                (pgp_content_enum) pgp_key_get_type(key),
-                                key->format,
-                                NULL)) {
+    if (!write_key_to_rawpacket(
+          seckey, pgp_key_get_rawpacket(key, 0), pgp_key_get_type(key), key->format, NULL)) {
         goto done;
     }
     if (decrypted_seckey) {
@@ -1396,7 +1449,7 @@ pgp_key_add_userid_certified(pgp_key_t *              key,
     }
 
     /* Fill the transferable userid */
-    uid.uid.tag = PGP_PTAG_CT_USER_ID;
+    uid.uid.tag = PGP_PKT_USER_ID;
     uid.uid.uid_len = strlen((char *) cert->userid);
     if (!(uid.uid.uid = (uint8_t *) malloc(uid.uid.uid_len))) {
         RNP_LOG("allocation failed");
@@ -1435,6 +1488,66 @@ pgp_key_write_packets(const pgp_key_t *key, pgp_dest_t *dst)
     return true;
 }
 
+static bool
+packet_matches(pgp_pkt_type_t tag, bool secret)
+{
+    switch (tag) {
+    case PGP_PKT_SIGNATURE:
+    case PGP_PKT_USER_ID:
+    case PGP_PKT_USER_ATTR:
+        return true;
+    case PGP_PKT_PUBLIC_KEY:
+    case PGP_PKT_PUBLIC_SUBKEY:
+        return !secret;
+    case PGP_PKT_SECRET_KEY:
+    case PGP_PKT_SECRET_SUBKEY:
+        return secret;
+    default:
+        return false;
+    }
+}
+
+static bool
+write_xfer_packets(pgp_dest_t *           dst,
+                   const pgp_key_t *      key,
+                   const rnp_key_store_t *keyring,
+                   bool                   secret)
+{
+    for (size_t i = 0; i < pgp_key_get_rawpacket_count(key); i++) {
+        pgp_rawpacket_t *pkt = pgp_key_get_rawpacket(key, i);
+
+        if (!packet_matches(pkt->tag, secret)) {
+            RNP_LOG("skipping packet with tag: %d", pkt->tag);
+            continue;
+        }
+        dst_write(dst, pkt->raw, (size_t) pkt->length);
+    }
+
+    if (!keyring) {
+        return !dst->werr;
+    }
+
+    // Export subkeys
+    for (list_item *grip = list_front(key->subkey_grips); grip; grip = list_next(grip)) {
+        const pgp_key_t *subkey = rnp_key_store_get_key_by_grip(keyring, (uint8_t *) grip);
+        if (!write_xfer_packets(dst, subkey, NULL, secret)) {
+            RNP_LOG("Error occured when exporting a subkey");
+            return false;
+        }
+    }
+
+    return !dst->werr;
+}
+
+bool
+pgp_key_write_xfer(pgp_dest_t *dst, const pgp_key_t *key, const rnp_key_store_t *keyring)
+{
+    if (!pgp_key_get_rawpacket_count(key)) {
+        return false;
+    }
+    return write_xfer_packets(dst, key, keyring, pgp_key_is_secret(key));
+}
+
 pgp_key_t *
 find_suitable_key(pgp_op_t            op,
                   pgp_key_t *         key,
@@ -1461,104 +1574,6 @@ find_suitable_key(pgp_op_t            op,
         subkey_grip = list_next(subkey_grip);
     }
     return NULL;
-}
-
-static const pgp_signature_t *
-get_subkey_binding(const pgp_key_t *subkey)
-{
-    // find the subkey binding signature
-    for (size_t i = 0; i < pgp_key_get_subsig_count(subkey); i++) {
-        const pgp_signature_t *sig = &pgp_key_get_subsig(subkey, i)->sig;
-        if (sig->type == PGP_SIG_SUBKEY) {
-            return sig;
-        }
-    }
-    return NULL;
-}
-
-static pgp_key_t *
-find_signer(const pgp_signature_t *   sig,
-            const rnp_key_store_t *   store,
-            const pgp_key_provider_t *key_provider,
-            bool                      secret)
-{
-    pgp_key_search_t search;
-    pgp_key_t *      key = NULL;
-
-    // prefer using the issuer fingerprint when available
-    if (signature_has_keyfp(sig)) {
-        search.type = PGP_KEY_SEARCH_FINGERPRINT;
-        signature_get_keyfp(sig, &search.by.fingerprint);
-        // search the store, if provided
-        if (store && (key = rnp_key_store_search(store, &search, NULL)) &&
-            pgp_key_is_secret(key) == secret) {
-            return key;
-        }
-
-        pgp_key_request_ctx_t ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.op = PGP_OP_MERGE_INFO;
-        ctx.secret = secret;
-        ctx.search = search;
-
-        // try the key provider
-        if ((key = pgp_request_key(key_provider, &ctx))) {
-            return key;
-        }
-    }
-    if (signature_get_keyid(sig, search.by.keyid)) {
-        search.type = PGP_KEY_SEARCH_KEYID;
-        // search the store, if provided
-        if (store && (key = rnp_key_store_search(store, &search, NULL)) &&
-            pgp_key_is_secret(key) == secret) {
-            return key;
-        }
-
-        pgp_key_request_ctx_t ctx;
-        memset(&ctx, 0, sizeof(ctx));
-        ctx.op = PGP_OP_MERGE_INFO;
-        ctx.secret = secret;
-        ctx.search = search;
-
-        if ((key = pgp_request_key(key_provider, &ctx))) {
-            return key;
-        }
-    }
-    return NULL;
-}
-
-/* Some background related to this function:
- * Given that
- * - It doesn't really make sense to support loading a subkey for which no primary is
- *   available, because:
- *   - We can't verify the binding signature without the primary.
- *   - The primary holds the userids.
- *   - The way we currently write keyrings out, orphan keys would be omitted.
- * - The way we maintain a link between primary and sub is via:
- *   - primary_grip in the subkey
- *   - subkey_grips in the primary
- *
- * We clearly need the primary to be available when loading a subkey.
- * Rather than requiring it to be loaded first, we just use the key provider.
- */
-pgp_key_t *
-pgp_get_primary_key_for(const pgp_key_t *         subkey,
-                        const rnp_key_store_t *   store,
-                        const pgp_key_provider_t *key_provider)
-{
-    const pgp_signature_t *binding_sig = NULL;
-
-    // find the subkey binding signature
-    binding_sig = get_subkey_binding(subkey);
-    if (!binding_sig) {
-        RNP_LOG("Missing subkey binding signature for key.");
-        return NULL;
-    }
-    if (!signature_has_keyfp(binding_sig) && !signature_has_keyid(binding_sig)) {
-        RNP_LOG("No issuer information in subkey binding signature.");
-        return NULL;
-    }
-    return find_signer(binding_sig, store, key_provider, pgp_key_is_secret(subkey));
 }
 
 pgp_hash_alg_t

@@ -8,7 +8,9 @@ on:
       - 'release/**'
 
 env:
-  CODECOV_TOKEN: dbecf176-ea3f-4832-b743-295fd71d0fad
+  BUILD_MODE: normal
+  GPG_VERSION: stable
+  CORES: 2
 
 jobs:
   tests:
@@ -29,8 +31,8 @@ jobs:
         run: pacman -Syu --noconfirm --noprogressbar --needed
       - name: Finish MSYS2 update
         run: pacman.exe -Syu --noconfirm --noprogressbar --needed
+      - name: install
+        run: bash.exe ci/before_install.sh
       - name: tests
-        run: bash.exe ./ci/run.sh
-        env:
-          BUILD_MODE: normal
-          GPG_VERSION: stable
+        run: bash.exe -c ". ci/env.inc.sh && ci/main.sh"
+

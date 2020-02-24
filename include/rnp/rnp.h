@@ -356,7 +356,7 @@ rnp_result_t rnp_load_keys(rnp_ffi_t   ffi,
  *  Note: After unloading all key handles will become invalid and must be destroyed.
  * @param ffi
  * @param flags choose which keys should be unloaded (pubic, secret or both).
- *              See RNP_UNLOAD_PUBLIC_KEYS/RNP_UNLOAD_SECRET_KEYS.
+ *              See RNP_KEY_UNLOAD_PUBLIC/RNP_KEY_UNLOAD_SECRET.
  * @return RNP_SUCCESS on success, or any other value on error.
  */
 rnp_result_t rnp_unload_keys(rnp_ffi_t ffi, uint32_t flags);
@@ -372,6 +372,21 @@ rnp_result_t rnp_unload_keys(rnp_ffi_t ffi, uint32_t flags);
  * @return RNP_SUCCESS on success, or any other value on error.
  */
 rnp_result_t rnp_import_keys(rnp_ffi_t ffi, rnp_input_t input, uint32_t flags, char **results);
+
+/** import standalone signatures to the keyring and receive JSON list of the updated keys.
+ *
+ *  @param ffi
+ *  @param input source to read from. Cannot be NULL.
+ *  @param flags additional import flags, currently must be 0.
+ *  @param results if not NULL then after the successfull execution will contain JSON with
+ *                 information about the updated keys. You must free it using the
+ *                 rnp_buffer_destroy() function.
+ *  @return RNP_SUCCESS on success, or any other value on error.
+ */
+rnp_result_t rnp_import_signatures(rnp_ffi_t   ffi,
+                                   rnp_input_t input,
+                                   uint32_t    flags,
+                                   char **     results);
 
 /** save keys
  *
@@ -765,6 +780,30 @@ rnp_result_t rnp_op_generate_destroy(rnp_op_generate_t op);
  *  @return RNP_SUCCESS on success, or any other value on error
  **/
 rnp_result_t rnp_key_export(rnp_key_handle_t key, rnp_output_t output, uint32_t flags);
+
+/**
+ * @brief Generate and export primary key revocation signature.
+ *        Note: to revoke a key you'll need to import this signature into the keystore or use
+ *        rnp_key_revoke() function.
+ * @param key primary key to be revoked. Must have secret key, otherwise keyrings will be
+ *            searched for the authorized to issue revocation signature secret key. If secret
+ *            key is locked then password will be asked via password provider.
+ * @param output signature contents will be saved here.
+ * @param flags currently must be 0.
+ * @param hash hash algorithm used to calculate signature. Pass NULL for default algorithm
+ *             selection.
+ * @param code reason for revocation code. Possible values: 'no', 'superseded', 'compromised',
+ *             'retired'. May be NULL - then 'no' value will be used.
+ * @param reason textual representation of the reason for revocation. May be NULL or empty
+ *               string.
+ * @return RNP_SUCCESS on success, or any other value on error
+ */
+rnp_result_t rnp_key_export_revocation(rnp_key_handle_t key,
+                                       rnp_output_t     output,
+                                       uint32_t         flags,
+                                       const char *     hash,
+                                       const char *     code,
+                                       const char *     reason);
 
 /** remove a key from keyring(s)
  *  Note: you need to call rnp_save_keys() to write updated keyring(s) out.
