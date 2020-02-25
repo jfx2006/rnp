@@ -675,6 +675,7 @@ cli_rnp_print_key_info(FILE *fp, rnp_ffi_t ffi, rnp_key_handle_t key, bool psecr
     const char * header = NULL;
     bool         secret = false;
     bool         primary = false;
+    bool         revoked = false;
     uint32_t     bits = 0;
     int64_t      create = 0;
     uint32_t     expiry = 0;
@@ -690,11 +691,11 @@ cli_rnp_print_key_info(FILE *fp, rnp_ffi_t ffi, rnp_key_handle_t key, bool psecr
         return;
     }
     if (!(pkts = json_tokener_parse(json))) {
-        fprintf(fp, "Key JSON error");
+        fprintf(fp, "Key JSON error.\n");
         goto done;
     }
     if (!(keypkt = json_object_array_get_idx(pkts, 0))) {
-        fprintf(fp, "Key JSON error");
+        fprintf(fp, "Key JSON error.\n");
         goto done;
     }
 
@@ -727,6 +728,11 @@ cli_rnp_print_key_info(FILE *fp, rnp_ffi_t ffi, rnp_key_handle_t key, bool psecr
         time_t expire_time = create + expiry;
         ptimestr(buf, sizeof(buf), expire_time);
         fprintf(fp, " [%s %s]", expire_time <= now ? "EXPIRED" : "EXPIRES", buf);
+    }
+    /* key is revoked */
+    (void) rnp_key_is_revoked(key, &revoked);
+    if (revoked) {
+        fprintf(fp, " [REVOKED]");
     }
     /* fingerprint */
     fprintf(fp, "\n      %s\n", json_obj_get_str(keypkt, "fingerprint"));
